@@ -1,0 +1,202 @@
+name: AgentCore A/B Release Gate
+description: Test an existing ECR image with a native AgentCore A/B test, then promote or roll back.
+inputs:
+  image-uri:
+    description: Existing ARM64 ECR image tag or digest; no image is built or published
+    required: true
+  runtime-id:
+    description: Existing AgentCore Runtime with a ready control endpoint
+    required: true
+  gateway-id:
+    description: Existing dedicated HTTP AgentCore Gateway with IAM authentication
+    required: true
+  aws-region:
+    description: AWS Region of the runtime and ECR image
+    required: true
+  duration-seconds:
+    description: Observation time; use 7200 in production and shorter values only for testing
+    default: "7200"
+  evaluation-config-id:
+    description: AgentCore Online Evaluation configuration ID used as template; the action creates fresh copies for both control and treatment from this, then deletes them after each run
+    required: true
+  ab-test-role-arn:
+    description: IAM role AgentCore assumes to run the A/B test, trusted by bedrock-agentcore.amazonaws.com
+    required: true
+  control-endpoint-name:
+    description: Name of the existing AgentCore Runtime endpoint used as the stable control variant
+    default: "control"
+  control-weight:
+    description: Percentage of Gateway traffic routed to control during observation
+    default: "80"
+  treatment-weight:
+    description: Percentage of Gateway traffic routed to treatment during observation
+    default: "20"
+  quality-gates:
+    description: JSON object mapping built-in, third-party, or custom AgentCore evaluator IDs to independent minimum scores
+    required: true
+  require-significance:
+    description: When 'true' (the default) an evaluator must also be statistically significant to pass its gate; when 'false' only the minimum score and regression checks apply
+    default: "true"
+  evaluation-timeout-seconds:
+    description: Maximum time to wait for managed AgentCore evaluation results
+    default: "1800"
+  scoring-lag-seconds:
+    description: After all evaluators have at least one scored result, keep polling until the total sample count has been unchanged for this many seconds before enforcing quality gates; set to 0 to evaluate on the first available results
+    default: "120"
+  step:
+    description: "Deployment phase to execute: 'auto' runs the full observe-then-promote pipeline in one job; 'observe' deploys the candidate, runs the A/B test, and uploads a state artifact; 'promote' downloads that artifact and promotes the candidate; 'rollback' downloads the artifact and restores the control"
+    default: "auto"
+  state-artifact-name:
+    description: Name of the state artifact produced by the observe step; required when step is 'promote' or 'rollback'
+    default: ""
+  github-token:
+    description: GitHub token; optional, used to publish a pull-request result comment
+    required: false
+    default: ""
+outputs:
+  runtime-version:
+    description: Promoted runtime version
+    value: ${{ inputs.step == 'auto' && steps.deploy.outputs.runtime-version || steps.promote.outputs.runtime-version }}
+  image-uri:
+    description: Resolved immutable ECR image URI
+    value: ${{ inputs.step == 'auto' && steps.deploy.outputs.image-uri || steps.promote.outputs.image-uri }}
+  state-artifact-name:
+    description: Name of the state artifact uploaded by the observe step; pass to the promote and rollback steps
+    value: ${{ steps.set-artifact-name.outputs.state-artifact-name }}
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+      with:
+        python-version: "3.13"
+
+    - name: Prepare action environment
+      id: setup
+      shell: bash
+      run: |
+        directory=$(mktemp -d "$RUNNER_TEMP/agentcore-ab-release-gate.XXXXXX")
+        python -m venv "$directory/venv"
+        "$directory/venv/bin/pip" install "$GITHUB_ACTION_PATH"
+        echo "directory=$directory" >> "$GITHUB_OUTPUT"
+
+    - name: Download state artifact
+      if: ${{ inputs.step == 'promote' || inputs.step == 'rollback' }}
+      uses: actions/download-artifact@v4
+      with:
+        name: ${{ inputs.state-artifact-name }}
+        path: ${{ steps.setup.outputs.directory }}
+
+    - name: Deploy candidate, observe, and promote automatically
+      id: deploy
+      if: ${{ success() && inputs.step == 'auto' }}
+      shell: bash
+      env:
+        AWS_REGION: ${{ inputs.aws-region }}
+        RUNTIME_ID: ${{ inputs.runtime-id }}
+        GATEWAY_ID: ${{ inputs.gateway-id }}
+        IMAGE_URI: ${{ inputs.image-uri }}
+        DURATION_SECONDS: ${{ inputs.duration-seconds }}
+        EVALUATION_CONFIG_ID: ${{ inputs.evaluation-config-id }}
+        AB_TEST_ROLE_ARN: ${{ inputs.ab-test-role-arn }}
+        CONTROL_ENDPOINT_NAME: ${{ inputs.control-endpoint-name }}
+        CONTROL_WEIGHT: ${{ inputs.control-weight }}
+        TREATMENT_WEIGHT: ${{ inputs.treatment-weight }}
+        QUALITY_GATES: ${{ inputs.quality-gates }}
+        REQUIRE_SIGNIFICANCE: ${{ inputs.require-significance }}
+        EVALUATION_TIMEOUT_SECONDS: ${{ inputs.evaluation-timeout-seconds }}
+        SCORING_LAG_SECONDS: ${{ inputs.scoring-lag-seconds }}
+        ACTION_DIRECTORY: ${{ steps.setup.outputs.directory }}
+      run: |
+        export STATE_FILE="$ACTION_DIRECTORY/state.json"
+        "$ACTION_DIRECTORY/venv/bin/python" "$GITHUB_ACTION_PATH/main.py" run
+
+    - name: Deploy candidate and observe
+      id: observe
+      if: ${{ success() && inputs.step == 'observe' }}
+      shell: bash
+      env:
+        AWS_REGION: ${{ inputs.aws-region }}
+        RUNTIME_ID: ${{ inputs.runtime-id }}
+        GATEWAY_ID: ${{ inputs.gateway-id }}
+        IMAGE_URI: ${{ inputs.image-uri }}
+        DURATION_SECONDS: ${{ inputs.duration-seconds }}
+        EVALUATION_CONFIG_ID: ${{ inputs.evaluation-config-id }}
+        AB_TEST_ROLE_ARN: ${{ inputs.ab-test-role-arn }}
+        CONTROL_ENDPOINT_NAME: ${{ inputs.control-endpoint-name }}
+        CONTROL_WEIGHT: ${{ inputs.control-weight }}
+        TREATMENT_WEIGHT: ${{ inputs.treatment-weight }}
+        QUALITY_GATES: ${{ inputs.quality-gates }}
+        REQUIRE_SIGNIFICANCE: ${{ inputs.require-significance }}
+        EVALUATION_TIMEOUT_SECONDS: ${{ inputs.evaluation-timeout-seconds }}
+        SCORING_LAG_SECONDS: ${{ inputs.scoring-lag-seconds }}
+        ACTION_DIRECTORY: ${{ steps.setup.outputs.directory }}
+      run: |
+        export STATE_FILE="$ACTION_DIRECTORY/state.json"
+        "$ACTION_DIRECTORY/venv/bin/python" "$GITHUB_ACTION_PATH/main.py" observe
+
+    - name: Upload state artifact
+      id: upload-state
+      if: ${{ success() && inputs.step == 'observe' }}
+      uses: actions/upload-artifact@v4
+      with:
+        name: agentcore-state-${{ github.run_id }}
+        path: ${{ steps.setup.outputs.directory }}/state.json
+        overwrite: true
+
+    - name: Set state artifact name output
+      id: set-artifact-name
+      if: ${{ success() && inputs.step == 'observe' }}
+      shell: bash
+      run: echo "state-artifact-name=agentcore-state-${{ github.run_id }}" >> "$GITHUB_OUTPUT"
+
+    - name: Promote candidate
+      id: promote
+      if: ${{ success() && inputs.step == 'promote' }}
+      shell: bash
+      env:
+        AWS_REGION: ${{ inputs.aws-region }}
+        RUNTIME_ID: ${{ inputs.runtime-id }}
+        GATEWAY_ID: ${{ inputs.gateway-id }}
+        ACTION_DIRECTORY: ${{ steps.setup.outputs.directory }}
+      run: |
+        export STATE_FILE="$ACTION_DIRECTORY/state.json"
+        "$ACTION_DIRECTORY/venv/bin/python" "$GITHUB_ACTION_PATH/main.py" promote
+
+    - name: Roll back candidate
+      id: explicit-rollback
+      if: ${{ inputs.step == 'rollback' }}
+      shell: bash
+      env:
+        AWS_REGION: ${{ inputs.aws-region }}
+        RUNTIME_ID: ${{ inputs.runtime-id }}
+        GATEWAY_ID: ${{ inputs.gateway-id }}
+        ACTION_DIRECTORY: ${{ steps.setup.outputs.directory }}
+      run: |
+        export STATE_FILE="$ACTION_DIRECTORY/state.json"
+        "$ACTION_DIRECTORY/venv/bin/python" "$GITHUB_ACTION_PATH/main.py" rollback
+
+    - name: Restore control after failure or cancellation
+      id: cleanup
+      if: ${{ always() && steps.setup.outputs.directory != '' && (inputs.step == 'auto' || inputs.step == 'observe' || inputs.step == 'promote') }}
+      shell: bash
+      env:
+        AWS_REGION: ${{ inputs.aws-region }}
+        RUNTIME_ID: ${{ inputs.runtime-id }}
+        GATEWAY_ID: ${{ inputs.gateway-id }}
+        ACTION_DIRECTORY: ${{ steps.setup.outputs.directory }}
+      run: |
+        export STATE_FILE="$ACTION_DIRECTORY/state.json"
+        "$ACTION_DIRECTORY/venv/bin/python" "$GITHUB_ACTION_PATH/main.py" rollback
+
+    - name: Publish result on pull request
+      if: ${{ always() && inputs.github-token != '' && github.event.pull_request.number && inputs.step != 'observe' }}
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+        RUN_OUTCOME: ${{ inputs.step == 'auto' && steps.deploy.outcome || steps.promote.outcome }}
+        STATE_FILE: ${{ steps.setup.outputs.directory }}/state.json
+        ACTION_DIRECTORY: ${{ steps.setup.outputs.directory }}
+      run: |
+        export DEPLOY_OUTCOME="$RUN_OUTCOME"
+        "$ACTION_DIRECTORY/venv/bin/python" "$GITHUB_ACTION_PATH/main.py" report
