@@ -361,7 +361,10 @@ class Deployment:
                 "ACTIVE",
                 execution_status="STOPPED",
             )
-        except self.aws.agentcore.exceptions.ResourceNotFoundException:
+        except (
+            self.aws.agentcore.exceptions.ResourceNotFoundException,
+            self.aws.agentcore.exceptions.ConflictException,
+        ):
             pass
 
     def _deploy_candidate(self, config: JsonObject, image: str) -> str:
