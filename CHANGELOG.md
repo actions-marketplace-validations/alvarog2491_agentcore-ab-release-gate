@@ -2,6 +2,19 @@
 
 <!-- version list -->
 
+## v1.1.1 (2026-09-25)
+
+### Bug Fixes
+
+- Report respects require-significance when rendering gate results
+  ([#3](https://github.com/alvarog2491/agentcore-ab-release-gate/pull/3),
+  [`af41761`](https://github.com/alvarog2491/agentcore-ab-release-gate/commit/af41761a647571e75f2a0299017e19d3ede26d2c))
+
+- Streamline report rendering by consolidating string formatting
+  ([#3](https://github.com/alvarog2491/agentcore-ab-release-gate/pull/3),
+  [`af41761`](https://github.com/alvarog2491/agentcore-ab-release-gate/commit/af41761a647571e75f2a0299017e19d3ede26d2c))
+
+
 ## v1.1.0 (2026-09-25)
 
 ### Continuous Integration
