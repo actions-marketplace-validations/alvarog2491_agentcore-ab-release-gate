@@ -10,11 +10,17 @@ from agentcore_release_gate.constants import (
     GITHUB_COMMENTS_PAGE_SIZE,
     GITHUB_REQUEST_TIMEOUT_SECONDS,
 )
+from agentcore_release_gate.evaluation import gate_failure_reason
 from agentcore_release_gate.types import GitHubResponse, JsonObject
 
 COMMENT_MARKER = "<!-- agentcore-ab-release-gate-report -->"
 GITHUB_API = "https://api.github.com"
 REPOSITORY_PATTERN = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
+FAILURE_LABELS = {
+    "below_minimum": "❌ Below minimum",
+    "not_significant": "❌ Not significant",
+    "regressed": "❌ Regressed vs control",
+}
 
 
 def build_report(state: JsonObject, outcome: str, run_url: str = "") -> str:
@@ -44,6 +50,7 @@ def build_report(state: JsonObject, outcome: str, run_url: str = "") -> str:
 
     gates = state.get("quality_gates", {})
     results = state.get("variant_results", {})
+    require_significance = state.get("require_significance", True)
     if gates:
         lines.extend(
             [
@@ -64,21 +71,26 @@ def build_report(state: JsonObject, outcome: str, run_url: str = "") -> str:
             samples = f"{variant['controlSampleSize']}/{variant['treatmentSampleSize']}"
             rendered_change = f"{change:g}" if isinstance(change, (int, float)) else "—"
             rendered_p_value = f"{p_value:g}" if isinstance(p_value, (int, float)) else "—"
-            if mean < minimum:
-                result = "❌ Below minimum"
-            elif not significant:
-                result = "❌ Not significant"
-            elif change is not None and change < 0:
-                result = "❌ Regressed vs control"
+            reason = gate_failure_reason(
+                variant, minimum, require_significance=require_significance
+            )
+            result = FAILURE_LABELS[reason] if reason else "✅ Pass"
+            if significant:
+                rendered_significant = "Yes"
+            elif require_significance:
+                rendered_significant = "No"
             else:
-                result = "✅ Pass"
+                rendered_significant = "No (not required)"
             lines.append(
-                f"| `{evaluator}` | {mean:g} | {minimum:g} | {'Yes' if significant else 'No'} | "
+                f"| `{evaluator}` | {mean:g} | {minimum:g} | {rendered_significant} | "
                 f"{rendered_change} | {rendered_p_value} | {samples} | {result} |"
             )
     elif not state:
         lines.extend(
-            ["", "No deployment state was recorded. Check the workflow logs for the setup error."]
+            [
+                "",
+                "No deployment state was recorded. Check the workflow logs for the setup error.",
+            ]
         )
 
     if run_url:
