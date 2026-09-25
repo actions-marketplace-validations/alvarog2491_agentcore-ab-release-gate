@@ -9,15 +9,23 @@ from types import SimpleNamespace
 
 import boto3
 import pytest
+from botocore.exceptions import ClientError
 from botocore.validate import validate_parameters
+from pydantic import ValidationError
 
 ACTION = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ACTION))
 import main as cli
 from agentcore_release_gate import aws_client as ab_aws
 from agentcore_release_gate import deployment as ab
-from agentcore_release_gate.evaluation import _collect_variant_results, enforce_quality_gates
-from agentcore_release_gate.utils import _parse_image, parse_quality_gates, parse_weights
+from agentcore_release_gate.evaluation import (
+    _collect_variant_results,
+    enforce_quality_gates,
+    wait_for_ab_test_results,
+)
+from agentcore_release_gate.report import COMMENT_MARKER
+from agentcore_release_gate.schemas import ActionConfig
+from agentcore_release_gate.utils import _parse_image, wait_for
 
 
 @pytest.mark.parametrize(
@@ -48,41 +56,122 @@ def test_invalid_managed_scores_fail_closed(score):
         _collect_variant_results(results, {"custom-eval-abcdefghij": 3})
 
 
-def test_quality_gate_contract():
-    gates = {"Builtin.Helpfulness": 0.7, "custom-eval-abcdefghij": 3}
+def test_collect_variant_results_excludes_zero_sample_evaluator():
+    results = {
+        "evaluatorMetrics": [
+            {
+                "evaluatorArn": "arn:aws:bedrock-agentcore:us-east-1:123456789012:evaluator/Builtin.Helpfulness",
+                "controlStats": {"variantName": "C", "sampleSize": 0, "mean": 0.0},
+                "variantResults": [
+                    {
+                        "variantName": "T1",
+                        "sampleSize": 0,
+                        "mean": 0.8,
+                        "isSignificant": False,
+                        "absoluteChange": None,
+                    }
+                ],
+            }
+        ]
+    }
 
-    assert parse_quality_gates(json.dumps(gates)) == gates
+    assert _collect_variant_results(results, {"Builtin.Helpfulness": 0.7}) == {}
+
+
+def test_collect_variant_results_ignores_invalid_mean_on_unrelated_evaluator():
+    results = {
+        "evaluatorMetrics": [
+            {
+                "evaluatorArn": "arn:aws:bedrock-agentcore:us-east-1:123456789012:evaluator/Builtin.Helpfulness",
+                "controlStats": {"variantName": "C", "sampleSize": 10, "mean": 0.75},
+                "variantResults": [
+                    {
+                        "variantName": "T1",
+                        "sampleSize": 8,
+                        "mean": 0.8,
+                        "isSignificant": True,
+                        "absoluteChange": 0.05,
+                    }
+                ],
+            },
+            {
+                "evaluatorArn": "arn:aws:bedrock-agentcore:us-east-1:123456789012:evaluator/Builtin.Unrelated",
+                "controlStats": {"variantName": "C", "sampleSize": 5, "mean": 0.5},
+                "variantResults": [
+                    {"variantName": "T1", "sampleSize": 5, "mean": True, "isSignificant": True}
+                ],
+            },
+        ]
+    }
+
+    collected = _collect_variant_results(results, {"Builtin.Helpfulness": 0.7})
+
+    assert collected["Builtin.Helpfulness"]["mean"] == 0.8
+    assert "Builtin.Unrelated" not in collected
+
+
+def _action_config(**overrides):
+    defaults = {
+        "quality_gates": {"Builtin.Helpfulness": 0.7},
+        "evaluation_config_id": "template_eval-abcdefghij",
+        "ab_test_role_arn": "arn:aws:iam::123456789012:role/ABTestRole",
+        "control_weight": 80,
+        "treatment_weight": 20,
+        "evaluation_timeout": 900,
+        "duration_seconds": 7200,
+        "scoring_lag_seconds": 120,
+    }
+    defaults.update(overrides)
+    return ActionConfig(**defaults)
+
+
+def test_action_config_accepts_a_valid_configuration():
+    config = _action_config(quality_gates={"Builtin.Helpfulness": 0.7, "custom-eval-abcdefghij": 3})
+
+    assert config.quality_gates == {"Builtin.Helpfulness": 0.7, "custom-eval-abcdefghij": 3}
+    assert (config.control_weight, config.treatment_weight) == (80, 20)
 
 
 @pytest.mark.parametrize(
-    "value",
+    "gates",
+    [{}, {"unknown": 1}, {"Builtin.Helpfulness": True}, {"Builtin.Helpfulness": float("nan")}],
+    ids=["empty", "unknown-evaluator", "boolean", "nan"],
+)
+def test_action_config_rejects_invalid_quality_gates(gates):
+    with pytest.raises(ValidationError, match="quality-gates"):
+        _action_config(quality_gates=gates)
+
+
+@pytest.mark.parametrize(
+    ("control_weight", "treatment_weight"),
+    [(0, 100), (100, 0), (50, 51)],
+    ids=["zero-control", "zero-treatment", "sum-over-100"],
+)
+def test_action_config_rejects_invalid_weights(control_weight, treatment_weight):
+    with pytest.raises(ValidationError, match="weight"):
+        _action_config(control_weight=control_weight, treatment_weight=treatment_weight)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "match"),
     [
-        "{}",
-        "[]",
-        '{"unknown": 1}',
-        '{"Builtin.Helpfulness": true}',
-        '{"Builtin.Helpfulness": NaN}',
-        "not-json",
+        ("evaluation_config_id", "  ", "evaluation-config-id"),
+        ("ab_test_role_arn", "  ", "ab-test-role-arn"),
+        ("evaluation_timeout", 0, "Evaluation timeout"),
+        ("duration_seconds", 30, "observation must last"),
+        ("scoring_lag_seconds", -1, "Scoring lag"),
     ],
-    ids=["empty", "list", "unknown-evaluator", "boolean", "nan", "invalid-json"],
+    ids=[
+        "blank-eval-config-id",
+        "blank-role-arn",
+        "non-positive-timeout",
+        "short-duration",
+        "negative-lag",
+    ],
 )
-def test_invalid_quality_gates_are_rejected(value):
-    with pytest.raises(ValueError, match="quality-gates"):
-        parse_quality_gates(value)
-
-
-def test_weight_contract():
-    assert parse_weights("80", "20") == (80, 20)
-
-
-@pytest.mark.parametrize(
-    ("control", "treatment"),
-    [("0", "100"), ("100", "0"), ("50", "51"), ("abc", "20")],
-    ids=["zero-control", "zero-treatment", "sum-over-100", "non-numeric"],
-)
-def test_invalid_weights_are_rejected(control, treatment):
-    with pytest.raises(ValueError, match="weight"):
-        parse_weights(control, treatment)
+def test_action_config_rejects_invalid_fields(field, value, match):
+    with pytest.raises(ValidationError, match=match):
+        _action_config(**{field: value})
 
 
 @pytest.mark.parametrize(
@@ -316,9 +405,15 @@ class Api:
         }
 
 
+class _ConflictException(Exception):
+    """Stand-in for the real bedrock-agentcore ConflictException."""
+
+
 class AbTestApi:
     def __init__(self):
-        self.exceptions = SimpleNamespace(ResourceNotFoundException=KeyError)
+        self.exceptions = SimpleNamespace(
+            ResourceNotFoundException=KeyError, ConflictException=_ConflictException
+        )
         self.tests = {}
         self.events = []
         self.results = copy.deepcopy(DEFAULT_RESULTS)
@@ -391,6 +486,94 @@ class AbTestApi:
             ]
         }
         return SimpleNamespace(paginate=lambda **_kwargs: [page])
+
+
+def test_interrupted_signal_handler_raises_keyboard_interrupt():
+    with pytest.raises(KeyboardInterrupt, match="attempting rollback"):
+        cli._interrupted(None, None)
+
+
+def test_wait_for_raises_on_failed_status():
+    with pytest.raises(RuntimeError, match="failed to become ready"):
+        wait_for(lambda: {"status": "UPDATE_FAILED"}, "READY")
+
+
+def test_wait_for_raises_on_error_status_case_insensitively():
+    with pytest.raises(RuntimeError, match="failed to become ready"):
+        wait_for(lambda: {"status": "SomeError"}, "READY")
+
+
+def test_wait_for_invokes_on_poll_callback_while_waiting(monkeypatch):
+    clock = Clock()
+    monkeypatch.setattr(ab.time, "monotonic", clock.now)
+    monkeypatch.setattr(ab.time, "sleep", clock.sleep)
+    statuses = iter(["PENDING", "PENDING", "READY"])
+    polled = []
+
+    wait_for(
+        lambda: {"status": next(statuses)},
+        "READY",
+        on_poll=lambda result: polled.append(result["status"]),
+    )
+
+    assert polled == ["PENDING", "PENDING"]
+
+
+def test_wait_for_times_out_when_status_never_reached(monkeypatch):
+    clock = Clock()
+    monkeypatch.setattr(ab.time, "monotonic", clock.now)
+    monkeypatch.setattr(ab.time, "sleep", clock.sleep)
+
+    with pytest.raises(TimeoutError, match="Timed out waiting for AWS readiness"):
+        wait_for(lambda: {"status": "PENDING"}, "READY", timeout=25)
+
+
+def test_wait_for_ab_test_results_fails_fast_when_no_sessions_score(monkeypatch):
+    clock = Clock()
+    monkeypatch.setattr(ab.time, "monotonic", clock.now)
+    monkeypatch.setattr(ab.time, "sleep", clock.sleep)
+    monkeypatch.setattr("builtins.print", lambda *_args, **_kwargs: None)
+    client = SimpleNamespace(get_ab_test=lambda **_kwargs: {"results": {"evaluatorMetrics": []}})
+
+    with pytest.raises(TimeoutError, match="No sessions scored"):
+        wait_for_ab_test_results(
+            client,
+            "abtest-1",
+            {"Builtin.Helpfulness": 0.7},
+            timeout=1000,
+            no_sessions_timeout=100,
+            scoring_lag_seconds=0,
+        )
+
+
+def test_wait_for_ab_test_results_scoring_lag_resets_on_new_samples(monkeypatch):
+    clock = Clock()
+    monkeypatch.setattr(ab.time, "monotonic", clock.now)
+    monkeypatch.setattr(ab.time, "sleep", clock.sleep)
+    monkeypatch.setattr("builtins.print", lambda *_args, **_kwargs: None)
+    calls = 0
+
+    def get_ab_test(**_kwargs):
+        nonlocal calls
+        calls += 1
+        results = copy.deepcopy(DEFAULT_RESULTS)
+        # Samples are still arriving on the first two polls; the count then plateaus,
+        # so the 90s scoring lag (3 polls @ 30s) must elapse from the LAST growth
+        # (call 2), not from the first fully-collected poll (call 1).
+        if calls <= 2:
+            for metric in results["evaluatorMetrics"]:
+                metric["variantResults"][0]["sampleSize"] += calls
+        return {"results": results}
+
+    client = SimpleNamespace(get_ab_test=get_ab_test)
+    quality_gates = {"Builtin.Helpfulness": 0.7, "Builtin.Correctness": 0.7}
+
+    collected = wait_for_ab_test_results(
+        client, "abtest-1", quality_gates, timeout=1000, scoring_lag_seconds=90
+    )
+
+    assert calls == 5
+    assert collected["Builtin.Helpfulness"]["treatmentSampleSize"] == 8
 
 
 class TestDeployment:
@@ -493,6 +676,83 @@ class TestDeployment:
         assert (
             self.deployment.aws.agentcore.tests[state["ab_test_id"]]["executionStatus"] == "RUNNING"
         )
+
+    def test_run_subcommand_deploys_observes_and_promotes(self, monkeypatch):
+        clients = {
+            "bedrock-agentcore-control": self.deployment.aws.agentcore_control,
+            "bedrock-agentcore": self.deployment.aws.agentcore,
+        }
+        session = SimpleNamespace(
+            client=lambda service, **_kwargs: clients.get(service, SimpleNamespace()),
+            region_name="us-east-1",
+        )
+        environment = {
+            "STATE_FILE": str(self.deployment.path),
+            "AWS_REGION": "us-east-1",
+            "RUNTIME_ID": self.deployment.aws.runtime_id,
+            "GATEWAY_ID": self.deployment.aws.gateway_id,
+            "IMAGE_URI": IMAGE,
+            "DURATION_SECONDS": "60",
+            "QUALITY_GATES": json.dumps(self.deployment.quality_gates),
+            "EVALUATION_CONFIG_ID": self.deployment.evaluation_config_template,
+            "AB_TEST_ROLE_ARN": self.deployment.ab_test_role_arn,
+            "EVALUATION_TIMEOUT_SECONDS": "60",
+        }
+        monkeypatch.setattr(os, "environ", environment)
+        monkeypatch.setattr(sys, "argv", ["main.py", "run"])
+        monkeypatch.setattr(ab_aws.boto3, "Session", lambda *_args, **_kwargs: session)
+
+        cli.main()
+
+        state = json.loads(self.deployment.path.read_text())
+        assert state["finished"] == "promoted"
+        assert self.deployment.aws.agentcore_control.endpoints == {"control": "2", "treatment": "2"}
+
+    @pytest.mark.parametrize(
+        ("overrides", "match"),
+        [
+            ({"EVALUATION_TIMEOUT_SECONDS": "0"}, "Evaluation timeout"),
+            ({"DURATION_SECONDS": "30"}, "observation must last"),
+            ({"SCORING_LAG_SECONDS": "-1"}, "Scoring lag"),
+            ({"EVALUATION_CONFIG_ID": " "}, "evaluation-config-id"),
+            ({"AB_TEST_ROLE_ARN": " "}, "ab-test-role-arn"),
+            ({"QUALITY_GATES": "not-json"}, "quality-gates"),
+            ({"QUALITY_GATES": "[]"}, "quality-gates"),
+            ({"QUALITY_GATES": "{}"}, "quality-gates"),
+            ({"CONTROL_WEIGHT": "abc"}, "control-weight"),
+            ({"TREATMENT_WEIGHT": "abc"}, "treatment-weight"),
+            ({"CONTROL_WEIGHT": "0", "TREATMENT_WEIGHT": "100"}, "weight"),
+            ({"CONTROL_WEIGHT": "50", "TREATMENT_WEIGHT": "51"}, "weight"),
+        ],
+        ids=[
+            "non-positive-timeout",
+            "duration-too-short",
+            "negative-scoring-lag",
+            "blank-evaluation-config-id",
+            "blank-ab-test-role-arn",
+            "malformed-quality-gates-json",
+            "quality-gates-not-an-object",
+            "quality-gates-empty-object",
+            "non-numeric-control-weight",
+            "non-numeric-treatment-weight",
+            "zero-control-weight",
+            "weights-sum-over-100",
+        ],
+    )
+    def test_build_deployment_rejects_invalid_configuration(self, monkeypatch, overrides, match):
+        environment = {
+            "STATE_FILE": str(self.deployment.path),
+            "IMAGE_URI": IMAGE,
+            "QUALITY_GATES": json.dumps(self.deployment.quality_gates),
+            "EVALUATION_CONFIG_ID": self.deployment.evaluation_config_template,
+            "AB_TEST_ROLE_ARN": self.deployment.ab_test_role_arn,
+        }
+        environment.update(overrides)
+        monkeypatch.setattr(os, "environ", environment)
+        monkeypatch.setattr(sys, "argv", ["main.py", "observe"])
+
+        with pytest.raises(ValueError, match=match):
+            cli.main()
 
     def test_promote_subcommand_promotes_saved_candidate(self, monkeypatch):
         self.deployment.observe_candidate(IMAGE, 60)
@@ -661,6 +921,23 @@ class TestDeployment:
         assert self.deployment.aws.agentcore_control.endpoints == {"control": "2", "treatment": "2"}
         assert self.deployment.aws.agentcore.tests[ab_test_id]["executionStatus"] == "STOPPED"
 
+    @pytest.mark.parametrize("require_significance", [True, False])
+    def test_observe_journals_require_significance_when_gates_pass(self, require_significance):
+        self.deployment.require_significance = require_significance
+        self.deployment.observe_candidate(IMAGE, 60)
+        state = json.loads(self.deployment.path.read_text())
+        assert state["require_significance"] is require_significance
+
+    @pytest.mark.parametrize("require_significance", [True, False])
+    def test_observe_journals_require_significance_when_gates_fail(self, require_significance):
+        self.deployment.require_significance = require_significance
+        self.deployment.quality_gates = {"Builtin.Helpfulness": 0.99}
+        with pytest.raises(ValueError, match="quality gates failed"):
+            self.deployment.observe_candidate(IMAGE, 60)
+        state = json.loads(self.deployment.path.read_text())
+        assert state["finished"] == "rolled_back"
+        assert state["require_significance"] is require_significance
+
     def test_observe_failure_rolls_back_without_promoting(self):
         self.deployment.quality_gates = {"Builtin.Helpfulness": 0.99}
         with pytest.raises(ValueError, match="quality gates failed"):
@@ -796,3 +1073,223 @@ class TestDeployment:
         assert len(self.deployment.aws.agentcore_control.ephemeral_configs) == 0
         assert self.deployment.state.get("ephemeral_control_config_id") is None
         assert self.deployment.state.get("ephemeral_treatment_config_id") is None
+
+    def test_promotion_tolerates_ab_test_already_stopped_conflict(self):
+        self.deployment.observe_candidate(IMAGE, 60)
+        original_update = self.deployment.aws.agentcore.update_ab_test
+
+        def update_ab_test(**kwargs):
+            if kwargs.get("executionStatus") == "STOPPED":
+                raise _ConflictException("AB test is already stopped")
+            return original_update(**kwargs)
+
+        self.deployment.aws.agentcore.update_ab_test = update_ab_test
+        self.deployment.promote_candidate()
+
+        assert self.deployment.state["finished"] == "promoted"
+
+    def test_rollback_tolerates_ab_test_already_stopped_conflict(self):
+        self.deployment.observe_candidate(IMAGE, 60)
+        original_update = self.deployment.aws.agentcore.update_ab_test
+
+        def update_ab_test(**kwargs):
+            if kwargs.get("executionStatus") == "STOPPED":
+                raise _ConflictException("AB test is already stopped")
+            return original_update(**kwargs)
+
+        self.deployment.aws.agentcore.update_ab_test = update_ab_test
+        self.deployment.rollback()
+
+        assert self.deployment.state["finished"] == "rolled_back"
+
+    def test_promotion_tolerates_ab_test_already_deleted(self):
+        self.deployment.observe_candidate(IMAGE, 60)
+        ab_test_id = self.deployment.state["ab_test_id"]
+        del self.deployment.aws.agentcore.tests[ab_test_id]
+
+        self.deployment.promote_candidate()
+
+        assert self.deployment.state["finished"] == "promoted"
+
+    def test_delete_evaluation_config_tolerates_already_deleted_config(self):
+        def delete_online_evaluation_config(**_kwargs):
+            raise KeyError("not found")
+
+        self.deployment.aws.agentcore_control.delete_online_evaluation_config = (
+            delete_online_evaluation_config
+        )
+
+        self.deployment.aws.delete_evaluation_config("eval-ephemeral-0")
+
+    def test_delete_ephemeral_configs_tolerates_unexpected_aws_delete_failure(self):
+        self.deployment.observe_candidate(IMAGE, 60)
+        error = ClientError(
+            {"Error": {"Code": "ThrottlingException", "Message": "Rate exceeded"}},
+            "DeleteOnlineEvaluationConfig",
+        )
+        self.deployment.aws.delete_evaluation_config = lambda _config_id: (_ for _ in ()).throw(
+            error
+        )
+
+        self.deployment.promote_candidate()
+
+        assert self.deployment.state["finished"] == "promoted"
+        assert self.deployment.state.get("ephemeral_control_config_id") is None
+        assert self.deployment.state.get("ephemeral_treatment_config_id") is None
+
+    def test_delete_ephemeral_configs_does_not_swallow_non_aws_bugs(self):
+        self.deployment.observe_candidate(IMAGE, 60)
+        self.deployment.aws.delete_evaluation_config = lambda _config_id: (_ for _ in ()).throw(
+            RuntimeError("programming error, not an AWS failure")
+        )
+
+        with pytest.raises(RuntimeError, match="programming error"):
+            self.deployment.promote_candidate()
+
+    def test_reuses_existing_treatment_endpoint_and_matching_gateway_targets(self, monkeypatch):
+        logs: list[str] = []
+        monkeypatch.setattr("builtins.print", lambda message, **_kwargs: logs.append(message))
+        self.deployment.aws.agentcore_control.endpoints["treatment"] = "1"
+        self.deployment.aws.agentcore_control.targets = {
+            "control": {
+                "targetId": "control",
+                "status": "READY",
+                "targetConfiguration": {
+                    "http": {"agentcoreRuntime": {"arn": ARN, "qualifier": "control"}}
+                },
+            },
+            "treatment": {
+                "targetId": "treatment",
+                "status": "READY",
+                "targetConfiguration": {
+                    "http": {"agentcoreRuntime": {"arn": ARN, "qualifier": "treatment"}}
+                },
+            },
+        }
+
+        self.deployment.observe_candidate(IMAGE, 60)
+
+        events = [json.loads(line)["event"] for line in logs if line.startswith("{")]
+        assert "treatment-endpoint-existing" in events
+        assert "treatment-endpoint-creating" not in events
+        assert events.count("gateway-target-existing") == 2
+        assert "gateway-target-creating" not in events
+
+    def test_rejects_gateway_target_with_mismatched_configuration(self):
+        self.deployment.aws.agentcore_control.targets = {
+            "control": {
+                "targetId": "control",
+                "status": "READY",
+                "targetConfiguration": {
+                    "http": {"agentcoreRuntime": {"arn": ARN, "qualifier": "wrong-endpoint"}}
+                },
+            },
+        }
+
+        with pytest.raises(ValueError, match="does not match runtime/endpoint"):
+            self.deployment.observe_candidate(IMAGE, 60)
+        assert self.deployment.state["finished"] == "rolled_back"
+
+    def test_resolve_image_rejects_region_mismatch(self):
+        wrong_region_image = "123456789012.dkr.ecr.eu-west-1.amazonaws.com/agent:v1"
+
+        with pytest.raises(ValueError, match="same AWS Region"):
+            self.deployment.aws.resolve_image(wrong_region_image)
+
+    def test_run_rejects_observation_shorter_than_minimum(self):
+        with pytest.raises(ValueError, match="at least 60 seconds"):
+            self.deployment.run(IMAGE, 59)
+
+    def test_observe_candidate_writes_variant_results_to_github_output(self, monkeypatch, tmp_path):
+        output_path = tmp_path / "github_output.txt"
+        monkeypatch.setenv("GITHUB_OUTPUT", str(output_path))
+
+        self.deployment.observe_candidate(IMAGE, 60)
+
+        line = output_path.read_text().strip()
+        assert line.startswith("variant-results=")
+        payload = json.loads(line.removeprefix("variant-results="))
+        assert payload["Builtin.Helpfulness"]["mean"] == 0.8
+
+    def test_promote_candidate_writes_runtime_outputs(self, monkeypatch, tmp_path):
+        output_path = tmp_path / "github_output.txt"
+        self.deployment.observe_candidate(IMAGE, 60)
+        monkeypatch.setenv("GITHUB_OUTPUT", str(output_path))
+
+        self.deployment.promote_candidate()
+
+        content = output_path.read_text()
+        assert "runtime-version=2" in content
+        assert f"image-uri={IMAGE}" in content
+
+
+class _GitHubResponse:
+    def __init__(self, payload):
+        self._payload = payload
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return False
+
+    def read(self):
+        return json.dumps(self._payload).encode()
+
+
+def test_report_subcommand_publishes_pr_comment(monkeypatch, tmp_path):
+    event_path = tmp_path / "event.json"
+    event_path.write_text(json.dumps({"pull_request": {"number": 7}}))
+    state_path = tmp_path / "state.json"
+    state_path.write_text(json.dumps({"finished": "promoted"}))
+    requests = []
+
+    def open_request(request, timeout):
+        requests.append(request)
+        return _GitHubResponse([])
+
+    monkeypatch.setattr("agentcore_release_gate.report.urlopen", open_request)
+    environment = {
+        "GITHUB_EVENT_PATH": str(event_path),
+        "STATE_FILE": str(state_path),
+        "GITHUB_REPOSITORY": "owner/repo",
+        "GITHUB_RUN_ID": "123",
+        "GITHUB_TOKEN": "token",
+        "DEPLOY_OUTCOME": "success",
+    }
+    monkeypatch.setattr(os, "environ", environment)
+    monkeypatch.setattr(sys, "argv", ["main.py", "report"])
+
+    cli.main()
+
+    assert [request.get_method() for request in requests] == ["GET", "POST"]
+    body = json.loads(requests[1].data)["body"]
+    assert body.startswith(COMMENT_MARKER)
+    assert "github.com/owner/repo/actions/runs/123" in body
+
+
+def test_report_subcommand_skips_when_no_pull_request(monkeypatch, tmp_path):
+    event_path = tmp_path / "event.json"
+    event_path.write_text(json.dumps({}))
+
+    def open_request(*_args, **_kwargs):
+        pytest.fail("report without a pull request must not call the GitHub API")
+
+    monkeypatch.setattr("agentcore_release_gate.report.urlopen", open_request)
+    monkeypatch.setattr(
+        os,
+        "environ",
+        {"GITHUB_EVENT_PATH": str(event_path), "STATE_FILE": str(tmp_path / "missing.json")},
+    )
+    monkeypatch.setattr(sys, "argv", ["main.py", "report"])
+
+    cli.main()
+
+
+def test_report_subcommand_never_fails_the_job(monkeypatch, capsys):
+    monkeypatch.setattr(os, "environ", {})
+    monkeypatch.setattr(sys, "argv", ["main.py", "report"])
+
+    cli.main()
+
+    assert "::warning::" in capsys.readouterr().out
