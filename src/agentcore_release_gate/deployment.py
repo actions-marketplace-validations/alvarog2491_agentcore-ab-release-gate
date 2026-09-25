@@ -3,8 +3,12 @@
 import json
 import os
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
+
+from botocore.exceptions import BotoCoreError, ClientError
 
 from agentcore_release_gate.aws_client import AwsClient
 from agentcore_release_gate.constants import (
@@ -76,6 +80,7 @@ class Deployment:
         )
 
     def _log(self, event: str, **details: Any) -> None:
+        """Print one structured JSON log line for a deployment event."""
         print(json.dumps({"event": event, **details}), flush=True)
 
     def _checkpoint(self, **changes: Any) -> None:
@@ -220,6 +225,47 @@ class Deployment:
             },
         }
 
+    def _create_and_activate_eval_config(
+        self, template: JsonObject, endpoint_name: str, variant_label: str, variant_key: str
+    ) -> tuple[str, str]:
+        """Create an ephemeral evaluation config for one variant and wait until active.
+
+        Checkpoints the new config immediately after creation so rollback can delete
+        it even if the subsequent wait is interrupted.
+
+        Args:
+            template: Evaluation config template to copy variant-specific settings from.
+            endpoint_name: Runtime endpoint the variant's data source should read from.
+            variant_label: "control" or "treatment"; used for log events and state keys.
+            variant_key: Short marker AWS uses to keep the generated config name distinct.
+
+        Returns:
+            Tuple of (onlineEvaluationConfigId, onlineEvaluationConfigArn).
+        """
+        self._log("evaluation-config-creating", variant=variant_label)
+        config_id, config_arn = self.aws.create_evaluation_config_from(
+            self._eval_config_for_variant(template, endpoint_name), variant=variant_key
+        )
+        self._log("evaluation-config-created", variant=variant_label, evaluationConfigId=config_id)
+        self._checkpoint(
+            **{
+                f"{variant_label}_evaluation_config_arn": config_arn,
+                f"ephemeral_{variant_label}_config_id": config_id,
+            }
+        )
+        wait_for(
+            lambda: self.aws.get_evaluation_config(config_id),
+            "ACTIVE",
+            on_poll=lambda r: self._log(
+                "evaluation-config-waiting",
+                variant=variant_label,
+                evaluationConfigId=config_id,
+                status=r.get("status", "UNKNOWN"),
+            ),
+        )
+        self._log("evaluation-config-ready", variant=variant_label, evaluationConfigId=config_id)
+        return config_id, config_arn
+
     def _start_ab_test(self) -> None:
         """Create and start the native A/B test that splits and scores traffic."""
         self._log(
@@ -227,59 +273,11 @@ class Deployment:
             evaluationConfigId=self.evaluation_config_template,
         )
         template = self.aws.get_evaluation_config(self.evaluation_config_template)
-        self._log("evaluation-config-creating", variant="control")
-        control_id, control_arn = self.aws.create_evaluation_config_from(
-            self._eval_config_for_variant(template, self.control_endpoint_name),
-            variant="c",
+        control_id, control_arn = self._create_and_activate_eval_config(
+            template, self.control_endpoint_name, "control", "c"
         )
-        self._log(
-            "evaluation-config-created",
-            variant="control",
-            evaluationConfigId=control_id,
-        )
-        # Checkpoint immediately so rollback can delete configs created before any wait freezes.
-        self._checkpoint(
-            control_evaluation_config_arn=control_arn,
-            ephemeral_control_config_id=control_id,
-        )
-        wait_for(
-            lambda: self.aws.get_evaluation_config(control_id),
-            "ACTIVE",
-            on_poll=lambda r: self._log(
-                "evaluation-config-waiting",
-                variant="control",
-                evaluationConfigId=control_id,
-                status=r.get("status", "UNKNOWN"),
-            ),
-        )
-        self._log("evaluation-config-ready", variant="control", evaluationConfigId=control_id)
-        self._log("evaluation-config-creating", variant="treatment")
-        treatment_id, treatment_arn = self.aws.create_evaluation_config_from(
-            self._eval_config_for_variant(template, "treatment"), variant="t"
-        )
-        self._log(
-            "evaluation-config-created",
-            variant="treatment",
-            evaluationConfigId=treatment_id,
-        )
-        self._checkpoint(
-            treatment_evaluation_config_arn=treatment_arn,
-            ephemeral_treatment_config_id=treatment_id,
-        )
-        wait_for(
-            lambda: self.aws.get_evaluation_config(treatment_id),
-            "ACTIVE",
-            on_poll=lambda r: self._log(
-                "evaluation-config-waiting",
-                variant="treatment",
-                evaluationConfigId=treatment_id,
-                status=r.get("status", "UNKNOWN"),
-            ),
-        )
-        self._log(
-            "evaluation-config-ready",
-            variant="treatment",
-            evaluationConfigId=treatment_id,
+        treatment_id, treatment_arn = self._create_and_activate_eval_config(
+            template, "treatment", "treatment", "t"
         )
         self._log(
             "ab-test-creating",
@@ -336,7 +334,10 @@ class Deployment:
                 continue
             try:
                 self.aws.delete_evaluation_config(config_id)
-            except Exception as exc:
+            except (ClientError, BotoCoreError) as exc:
+                # Best-effort cleanup: an AWS-side failure here must not block promotion
+                # or rollback. A bug in our own code should still surface, so only AWS's
+                # own exception hierarchy is swallowed.
                 print(
                     f"Warning: could not delete ephemeral config {config_id}: {exc}",
                     flush=True,
@@ -415,17 +416,12 @@ class Deployment:
                     f"AB test left RUNNING state during observation window "
                     f"(executionStatus={execution_status!r}); failing fast"
                 )
-            print(
-                json.dumps(
-                    {
-                        "event": "observing",
-                        "abTestId": ab_test_id,
-                        "elapsedSeconds": elapsed,
-                        "remainingSeconds": max(0, seconds - elapsed),
-                        "abTestStatus": execution_status,
-                    }
-                ),
-                flush=True,
+            self._log(
+                "observing",
+                abTestId=ab_test_id,
+                elapsedSeconds=elapsed,
+                remainingSeconds=max(0, seconds - elapsed),
+                abTestStatus=execution_status,
             )
 
     def rollback(self) -> None:
@@ -445,6 +441,22 @@ class Deployment:
         self._checkpoint(finished="rolled_back")
         print("Rolled back: control retains version " + self.state["baseline"], flush=True)
 
+    @contextmanager
+    def _rollback_on_failure(self) -> Iterator[None]:
+        """Roll back if the wrapped block raises, then re-raise the original failure."""
+        try:
+            yield
+        except BaseException:
+            try:
+                self.rollback()
+            except BaseException as recovery_error:
+                # Preserve the original failure and leave state for the cleanup step.
+                print(
+                    "Rollback failed; cleanup must retry: " + str(recovery_error),
+                    flush=True,
+                )
+            raise
+
     def observe_candidate(self, image: str, seconds: int) -> None:
         """Deploy and evaluate a candidate using observed traffic.
 
@@ -457,7 +469,7 @@ class Deployment:
         """
         image = self.aws.resolve_image(image)
         self._log("candidate-image-resolved", image=image, observationSeconds=seconds)
-        try:
+        with self._rollback_on_failure():
             config = self._prepare()
             self._checkpoint(quality_gates=self.quality_gates)
             self._deploy_candidate(config, image)
@@ -483,16 +495,6 @@ class Deployment:
             if os.environ.get("GITHUB_OUTPUT"):
                 with open(os.environ["GITHUB_OUTPUT"], "a") as output:
                     output.write(f"variant-results={json.dumps(variant_results)}\n")
-        except BaseException:
-            try:
-                self.rollback()
-            except BaseException as recovery_error:
-                # Preserve the original failure and leave state for the cleanup step.
-                print(
-                    "Rollback failed; cleanup must retry: " + str(recovery_error),
-                    flush=True,
-                )
-            raise
 
     def promote_candidate(self) -> None:
         """Promote a candidate that passed observation and quality gates.
@@ -505,7 +507,7 @@ class Deployment:
             raise RuntimeError("No candidate is ready to promote; run observation first")
         version = self.state["version"]
         image = self.state["image"]
-        try:
+        with self._rollback_on_failure():
             self._log("candidate-promotion-starting", version=version)
             self._checkpoint(promoting=True)
             # Stopping the AB test reverts all Gateway traffic to the control target
@@ -519,16 +521,6 @@ class Deployment:
             if os.environ.get("GITHUB_OUTPUT"):
                 with open(os.environ["GITHUB_OUTPUT"], "a") as output:
                     output.write(f"runtime-version={version}\nimage-uri={image}\n")
-        except BaseException:
-            try:
-                self.rollback()
-            except BaseException as recovery_error:
-                # Preserve the original failure and leave state for the cleanup step.
-                print(
-                    "Rollback failed; cleanup must retry: " + str(recovery_error),
-                    flush=True,
-                )
-            raise
 
     def run(self, image: str, seconds: int) -> None:
         """Observe and promote a candidate in one automatic operation.
