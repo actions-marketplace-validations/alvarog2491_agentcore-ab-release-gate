@@ -2,6 +2,31 @@
 
 <!-- version list -->
 
+## v1.1.2 (2026-09-27)
+
+### Bug Fixes
+
+- Raise named exceptions with clear messages
+  ([#6](https://github.com/alvarog2491/agentcore-ab-release-gate/pull/6),
+  [`180d61f`](https://github.com/alvarog2491/agentcore-ab-release-gate/commit/180d61f96ab702927aa12fe53dd9fc9407f5038c))
+
+### Chores
+
+- Add CODEOWNERS file to define repository ownership
+  ([#5](https://github.com/alvarog2491/agentcore-ab-release-gate/pull/5),
+  [`0738ae4`](https://github.com/alvarog2491/agentcore-ab-release-gate/commit/0738ae4c56f243906ac434233a77266f130c49ba))
+
+### Continuous Integration
+
+- Keep uv.lock in sync with the released project version
+  ([#4](https://github.com/alvarog2491/agentcore-ab-release-gate/pull/4),
+  [`2e630e9`](https://github.com/alvarog2491/agentcore-ab-release-gate/commit/2e630e9e2085809dc4dcec077f105fd20368d8f4))
+
+- Update uv version to 0.12.19 and adjust action configuration
+  ([#4](https://github.com/alvarog2491/agentcore-ab-release-gate/pull/4),
+  [`2e630e9`](https://github.com/alvarog2491/agentcore-ab-release-gate/commit/2e630e9e2085809dc4dcec077f105fd20368d8f4))
+
+
 ## v1.1.1 (2026-09-25)
 
 ### Bug Fixes
