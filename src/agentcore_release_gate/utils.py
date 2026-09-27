@@ -1,36 +1,16 @@
-"""Shared input validation and AWS readiness helpers."""
+"""Poll AWS resources until they reach a requested state."""
 
-import re
 import time
 from collections.abc import Callable, Collection
-from typing import TypeVar, cast
+from typing import TypeVar
 
 from agentcore_release_gate.constants import (
-    AWS_ACCOUNT_ID_LENGTH,
     AWS_POLL_INTERVAL_SECONDS,
     DEFAULT_AWS_WAIT_TIMEOUT_SECONDS,
-    SHA256_HEX_LENGTH,
 )
-from agentcore_release_gate.types import EcrImageParts
+from agentcore_release_gate.exceptions import AwsResourceFailedError, AwsWaitTimeoutError
 
 ResultT = TypeVar("ResultT", bound=dict[str, object])
-ECR_IMAGE_PATTERN = re.compile(
-    rf"(?P<account>\d{{{AWS_ACCOUNT_ID_LENGTH}}})\.dkr\.ecr\."
-    r"(?P<region>[a-z0-9-]+)\.amazonaws\.com(?:\.cn)?/"
-    rf"(?P<repository>[a-z0-9][a-z0-9/_.-]*)(?::(?P<tag>[\w.-]+)|"
-    rf"@(?P<digest>sha256:[a-f0-9]{{{SHA256_HEX_LENGTH}}}))"
-)
-
-
-def _parse_image(image: str) -> EcrImageParts:
-    """Validate an ECR image URI and return its registry components."""
-    match = ECR_IMAGE_PATTERN.fullmatch(image)
-    if not match:
-        raise ValueError(
-            "AgentCore requires an ECR image URI with a tag or digest. Mirror Docker Hub/GHCR "
-            "images to ECR before using this action; it does not publish images."
-        )
-    return cast(EcrImageParts, match.groupdict())
 
 
 def wait_for(
@@ -56,8 +36,8 @@ def wait_for(
         The first resource representation matching all requested conditions.
 
     Raises:
-        RuntimeError: If AWS reports a failed resource status.
-        TimeoutError: If the requested state is not reached before ``timeout``.
+        AwsResourceFailedError: If AWS reports a failed resource status.
+        AwsWaitTimeoutError: If the requested state is not reached before ``timeout``.
     """
     statuses = (status,) if isinstance(status, str) else status
     deadline = time.monotonic() + timeout
@@ -73,8 +53,8 @@ def wait_for(
         if isinstance(resource_status, str) and (
             "FAILED" in resource_status or "ERROR" in resource_status.upper()
         ):
-            raise RuntimeError("AWS resource failed to become ready")
+            raise AwsResourceFailedError("AWS resource failed to become ready")
         if on_poll is not None:
             on_poll(result)
         time.sleep(AWS_POLL_INTERVAL_SECONDS)
-    raise TimeoutError("Timed out waiting for AWS readiness")
+    raise AwsWaitTimeoutError("Timed out waiting for AWS readiness")

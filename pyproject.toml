@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "agentcore-ab-release-gate"
-version = "1.1.1"
+version = "1.1.2"
 description = "GitHub Action that deploys an ARM64 ECR image to AgentCore Runtime, runs a native A/B test, and promotes or rolls back based on managed evaluation results."
 readme = "README.md"
 requires-python = ">=3.13"
@@ -36,6 +36,7 @@ select = ["E4", "E7", "E9", "F", "I"]
 [tool.ruff.lint.per-file-ignores]
 "tests/test_action.py" = ["E402"]
 "tests/test_report.py" = ["E402"]
+"tests/test_exceptions.py" = ["E402"]
 
 [tool.mypy]
 python_version = "3.13"

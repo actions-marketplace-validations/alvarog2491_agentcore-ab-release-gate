@@ -1,20 +1,29 @@
 """AWS client for AgentCore Runtime, Gateway, Evaluations, A/B tests, and ECR."""
 
+import re
 import uuid
-from typing import Any, cast
+from typing import Any, TypedDict, cast
 
 import boto3
 from botocore.config import Config
 
 from agentcore_release_gate.constants import (
     AB_TEST_NAME_RANDOM_LENGTH,
+    AWS_ACCOUNT_ID_LENGTH,
     AWS_CONNECT_TIMEOUT_SECONDS,
     AWS_MAX_ATTEMPTS,
     AWS_READ_TIMEOUT_SECONDS,
+    SHA256_HEX_LENGTH,
 )
+from agentcore_release_gate.exceptions import ImageRegionMismatchError, InvalidImageUriError
 from agentcore_release_gate.types import JsonObject
-from agentcore_release_gate.utils import _parse_image
 
+ECR_IMAGE_PATTERN = re.compile(
+    rf"(?P<account>\d{{{AWS_ACCOUNT_ID_LENGTH}}})\.dkr\.ecr\."
+    r"(?P<region>[a-z0-9-]+)\.amazonaws\.com(?:\.cn)?/"
+    rf"(?P<repository>[a-z0-9][a-z0-9/_.-]*)(?::(?P<tag>[\w.-]+)|"
+    rf"@(?P<digest>sha256:[a-f0-9]{{{SHA256_HEX_LENGTH}}}))"
+)
 _EVAL_CONFIG_COPY_FIELDS = frozenset(
     {
         "rule",
@@ -26,6 +35,31 @@ _EVAL_CONFIG_COPY_FIELDS = frozenset(
         "description",
     }
 )
+
+
+class EcrImageParts(TypedDict):
+    """Parsed components of a validated ECR image URI."""
+
+    account: str
+    region: str
+    repository: str
+    tag: str | None
+    digest: str | None
+
+
+def _parse_image(image: str) -> EcrImageParts:
+    """Validate an ECR image URI and return its registry components.
+
+    Raises:
+        InvalidImageUriError: If the URI is not an ECR image with a tag or digest.
+    """
+    match = ECR_IMAGE_PATTERN.fullmatch(image)
+    if not match:
+        raise InvalidImageUriError(
+            "AgentCore requires an ECR image URI with a tag or digest. Mirror Docker Hub/GHCR "
+            "images to ECR before using this action; it does not publish images."
+        )
+    return cast(EcrImageParts, match.groupdict())
 
 
 class AwsClient:
@@ -347,11 +381,12 @@ class AwsClient:
             The input URI when already digest-pinned, otherwise its resolved digest URI.
 
         Raises:
-            ValueError: If the image belongs to a different AWS Region.
+            InvalidImageUriError: If the image is not a tagged or digest-pinned ECR URI.
+            ImageRegionMismatchError: If the image belongs to a different AWS Region.
         """
         parsed = _parse_image(image)
         if parsed["region"] != self.region:
-            raise ValueError("ECR image and AgentCore must use the same AWS Region")
+            raise ImageRegionMismatchError("ECR image and AgentCore must use the same AWS Region")
         if parsed["digest"]:
             return image
         result = self._ecr.describe_images(

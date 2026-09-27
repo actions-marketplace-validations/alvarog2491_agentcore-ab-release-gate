@@ -10,13 +10,14 @@ from agentcore_release_gate.constants import (
     GITHUB_COMMENTS_PAGE_SIZE,
     GITHUB_REQUEST_TIMEOUT_SECONDS,
 )
-from agentcore_release_gate.evaluation import gate_failure_reason
+from agentcore_release_gate.evaluation import GateFailureReason, gate_failure_reason
+from agentcore_release_gate.exceptions import ConfigurationError, UnexpectedGitHubResponseError
 from agentcore_release_gate.types import GitHubResponse, JsonObject
 
 COMMENT_MARKER = "<!-- agentcore-ab-release-gate-report -->"
 GITHUB_API = "https://api.github.com"
 REPOSITORY_PATTERN = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
-FAILURE_LABELS = {
+FAILURE_LABELS: dict[GateFailureReason, str] = {
     "below_minimum": "❌ Below minimum",
     "not_significant": "❌ Not significant",
     "regressed": "❌ Regressed vs control",
@@ -139,24 +140,24 @@ def publish_report(
         api_url: Base URL for the GitHub API.
 
     Raises:
-        ValueError: If the repository or pull-request number is invalid.
+        ConfigurationError: If the repository or pull-request number is invalid.
+        UnexpectedGitHubResponseError: If GitHub's comment listing is not a JSON array.
     """
     if not REPOSITORY_PATTERN.fullmatch(repository):
-        raise ValueError("GitHub repository must use owner/name format")
+        raise ConfigurationError("GitHub repository must use owner/name format")
     if pull_request <= 0:
-        raise ValueError("Pull request number must be positive")
+        raise ConfigurationError("Pull request number must be positive")
 
-    comments_url = f"{api_url.rstrip('/')}/repos/{repository}/issues/{pull_request}/comments"
-    owned_comment = None
+    issues_url = f"{api_url.rstrip('/')}/repos/{repository}/issues"
+    comments_url = f"{issues_url}/{pull_request}/comments"
     page = 1
-    while owned_comment is None:
-        response = _github_request(
+    while True:
+        comments = _github_request(
             token,
             f"{comments_url}?per_page={GITHUB_COMMENTS_PAGE_SIZE}&page={page}",
         )
-        if not isinstance(response, list):
-            raise ValueError("GitHub comments response must be a JSON array")
-        comments = response
+        if not isinstance(comments, list):
+            raise UnexpectedGitHubResponseError("GitHub comments response must be a JSON array")
         owned_comment = next(
             (
                 comment
@@ -173,5 +174,5 @@ def publish_report(
     if owned_comment is None:
         _github_request(token, comments_url, "POST", {"body": report})
         return
-    update_url = f"{api_url.rstrip('/')}/repos/{repository}/issues/comments/{owned_comment['id']}"
+    update_url = f"{issues_url}/comments/{owned_comment['id']}"
     _github_request(token, update_url, "PATCH", {"body": report})

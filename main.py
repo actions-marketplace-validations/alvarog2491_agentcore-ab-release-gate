@@ -8,7 +8,9 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
-from agentcore_release_gate.deployment import Deployment
+from agentcore_release_gate.aws_client import AwsClient
+from agentcore_release_gate.deployment import Deployment, load_state
+from agentcore_release_gate.exceptions import ConfigurationError, WorkflowCancelledError
 from agentcore_release_gate.report import build_report, publish_report
 from agentcore_release_gate.schemas import ActionConfig
 from agentcore_release_gate.workflow_logging import get_workflow_logger
@@ -16,9 +18,51 @@ from agentcore_release_gate.workflow_logging import get_workflow_logger
 logger = get_workflow_logger()
 
 
+def require_env(name: str) -> str:
+    """Return a required environment variable, failing with a message that names it.
+
+    Raises:
+        ConfigurationError: If the variable is unset.
+    """
+    try:
+        return os.environ[name]
+    except KeyError:
+        raise ConfigurationError(f"Required environment variable {name} is not set") from None
+
+
+def _write_step_outputs(outputs: dict[str, str]) -> None:
+    """Append step outputs to ``$GITHUB_OUTPUT`` when running inside GitHub Actions."""
+    output_path = os.environ.get("GITHUB_OUTPUT")
+    if not output_path:
+        return
+    with open(output_path, "a") as output:
+        output.writelines(f"{name}={value}\n" for name, value in outputs.items())
+
+
+def _write_variant_results(deployment: Deployment) -> None:
+    """Expose the evaluated A/B results as the ``variant-results`` step output."""
+    _write_step_outputs({"variant-results": json.dumps(deployment.state["variant_results"])})
+
+
+def _write_promoted_candidate(deployment: Deployment) -> None:
+    """Expose the promoted runtime version and image as step outputs."""
+    _write_step_outputs(
+        {"runtime-version": deployment.state["version"], "image-uri": deployment.state["image"]}
+    )
+
+
+def _aws_client() -> AwsClient:
+    """Build the AWS client for the runtime and Gateway named by the action inputs."""
+    return AwsClient(
+        region=require_env("AWS_REGION"),
+        runtime_id=require_env("RUNTIME_ID"),
+        gateway_id=require_env("GATEWAY_ID"),
+    )
+
+
 def _interrupted(_signal: int, _frame: object) -> None:
-    """Turn SIGTERM/SIGINT into KeyboardInterrupt so rollback handlers still run."""
-    raise KeyboardInterrupt("Workflow interrupted; attempting rollback")
+    """Turn SIGTERM/SIGINT into an exception so rollback handlers still run."""
+    raise WorkflowCancelledError("Workflow interrupted; attempting rollback")
 
 
 def cmd_report() -> None:
@@ -27,22 +71,20 @@ def cmd_report() -> None:
     Missing pull-request context is expected for non-PR workflows and skips
     reporting without affecting the deployment outcome.
     """
-    event = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text(encoding="utf-8"))
+    event = json.loads(Path(require_env("GITHUB_EVENT_PATH")).read_text(encoding="utf-8"))
     pull_request = event.get("pull_request", {}).get("number")
     if not pull_request:
         return
     state_path = os.environ.get("STATE_FILE", "")
-    state = {}
-    if state_path and Path(state_path).is_file():
-        state = json.loads(Path(state_path).read_text(encoding="utf-8"))
+    state = load_state(Path(state_path)) if state_path else {}
     server = os.environ.get("GITHUB_SERVER_URL", "https://github.com").rstrip("/")
     run_url = (
-        f"{server}/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['GITHUB_RUN_ID']}"
+        f"{server}/{require_env('GITHUB_REPOSITORY')}/actions/runs/{require_env('GITHUB_RUN_ID')}"
     )
     report = build_report(state, os.environ.get("DEPLOY_OUTCOME", "failure"), run_url)
     publish_report(
-        os.environ["GITHUB_TOKEN"],
-        os.environ["GITHUB_REPOSITORY"],
+        require_env("GITHUB_TOKEN"),
+        require_env("GITHUB_REPOSITORY"),
         int(pull_request),
         report,
         os.environ.get("GITHUB_API_URL", "https://api.github.com"),
@@ -58,7 +100,7 @@ def cmd_rollback(state_file: str) -> None:
     # Validation failures can reach cleanup without creating deployment state.
     if not Path(state_file).exists():
         return
-    Deployment(state_file).rollback()
+    Deployment(state_file, _aws_client()).rollback()
 
 
 def cmd_promote(state_file: str) -> None:
@@ -67,7 +109,9 @@ def cmd_promote(state_file: str) -> None:
     Args:
         state_file: Path to the deployment recovery journal.
     """
-    Deployment(state_file).promote_candidate()
+    deployment = Deployment(state_file, _aws_client())
+    deployment.promote_candidate()
+    _write_promoted_candidate(deployment)
 
 
 def _parse_int_env(name: str, default: str, label: str) -> int:
@@ -75,21 +119,23 @@ def _parse_int_env(name: str, default: str, label: str) -> int:
     try:
         return int(os.environ.get(name, default))
     except (TypeError, ValueError) as error:
-        raise ValueError(f"{label} must be an integer") from error
+        raise ConfigurationError(f"{label} must be an integer") from error
 
 
 def _load_action_config() -> ActionConfig:
     """Parse and validate the action's configuration from environment variables.
 
     Raises:
-        ValueError: If any input is missing, malformed, or out of range. Wraps
+        ConfigurationError: If any input is missing, malformed, or out of range. Wraps
             pydantic.ValidationError so the CLI surfaces a single readable message
             instead of a full validation-error dump.
     """
     try:
-        gates = json.loads(os.environ["QUALITY_GATES"])
+        gates = json.loads(require_env("QUALITY_GATES"))
     except (TypeError, json.JSONDecodeError) as error:
-        raise ValueError("quality-gates must map evaluator IDs to minimum scores") from error
+        raise ConfigurationError(
+            "quality-gates must map evaluator IDs to minimum scores"
+        ) from error
 
     try:
         return ActionConfig(
@@ -98,8 +144,8 @@ def _load_action_config() -> ActionConfig:
                 os.environ.get("REQUIRE_SIGNIFICANCE", "true").strip().lower() != "false"
             ),
             control_endpoint_name=os.environ.get("CONTROL_ENDPOINT_NAME", "control"),
-            evaluation_config_id=os.environ["EVALUATION_CONFIG_ID"],
-            ab_test_role_arn=os.environ["AB_TEST_ROLE_ARN"],
+            evaluation_config_id=require_env("EVALUATION_CONFIG_ID"),
+            ab_test_role_arn=require_env("AB_TEST_ROLE_ARN"),
             control_weight=_parse_int_env("CONTROL_WEIGHT", "80", "control-weight"),
             treatment_weight=_parse_int_env("TREATMENT_WEIGHT", "20", "treatment-weight"),
             evaluation_timeout=_parse_int_env(
@@ -109,7 +155,7 @@ def _load_action_config() -> ActionConfig:
             scoring_lag_seconds=_parse_int_env("SCORING_LAG_SECONDS", "120", "scoring-lag-seconds"),
         )
     except ValidationError as error:
-        raise ValueError("; ".join(err["msg"] for err in error.errors())) from error
+        raise ConfigurationError("; ".join(err["msg"] for err in error.errors())) from error
 
 
 def _build_deployment(state_file: str) -> tuple[Deployment, int]:
@@ -117,6 +163,7 @@ def _build_deployment(state_file: str) -> tuple[Deployment, int]:
     config = _load_action_config()
     deployment = Deployment(
         state_file,
+        _aws_client(),
         quality_gates=config.quality_gates,
         require_significance=config.require_significance,
         control_endpoint_name=config.control_endpoint_name,
@@ -137,7 +184,8 @@ def cmd_observe(state_file: str) -> None:
         state_file: Path where deployment state is persisted for later promotion.
     """
     deployment, duration = _build_deployment(state_file)
-    deployment.observe_candidate(os.environ["IMAGE_URI"], duration)
+    deployment.observe_candidate(require_env("IMAGE_URI"), duration)
+    _write_variant_results(deployment)
 
 
 def cmd_run(state_file: str) -> None:
@@ -147,7 +195,9 @@ def cmd_run(state_file: str) -> None:
         state_file: Path where deployment state is persisted for recovery.
     """
     deployment, duration = _build_deployment(state_file)
-    deployment.run(os.environ["IMAGE_URI"], duration)
+    deployment.run(require_env("IMAGE_URI"), duration)
+    _write_variant_results(deployment)
+    _write_promoted_candidate(deployment)
 
 
 def main() -> None:
@@ -164,7 +214,7 @@ def main() -> None:
             logger.warning("::warning::Unable to publish AgentCore A/B PR report: %s", error)
         return
 
-    state_file = os.environ["STATE_FILE"]
+    state_file = require_env("STATE_FILE")
     signal.signal(signal.SIGTERM, _interrupted)
     signal.signal(signal.SIGINT, _interrupted)
 
