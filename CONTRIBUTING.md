@@ -6,7 +6,7 @@
 uv sync
 ```
 
-Dependency-groups (`pytest`, `ruff`, `mypy`, `boto3-stubs`) sync by default. Pass
+Dependency-groups (`pytest`, `ruff`, `flake8`, `mypy`, `boto3-stubs`) sync by default. Pass
 `--no-dev` to reproduce the production-only install `action.yml` uses at runtime.
 
 ## Useful commands
@@ -16,6 +16,7 @@ Dependency-groups (`pytest`, `ruff`, `mypy`, `boto3-stubs`) sync by default. Pas
 | `uv run pytest` | Run the full test suite |
 | `uv run pytest --cov=src/agentcore_release_gate --cov=main --cov-report=term-missing` | Run with coverage (CI enforces >=85%) |
 | `uv run ruff check .` | Lint `src/`, `main.py`, and `tests/` |
+| `uv run flake8 .` | Lint with flake8 (config in `.flake8`) |
 | `uv run ruff format .` | Auto-format all Python files |
 | `uv run mypy src main.py` | Type-check the action's own source (strict mode) |
 
@@ -44,7 +45,7 @@ this action's core logic. No real AWS credentials or resources are needed.
 
 1. Edit source under `src/agentcore_release_gate/` or `main.py`.
 2. Add or update tests in `tests/`.
-3. Run `uv run pytest`, `uv run ruff check .`, and `uv run mypy src main.py` before opening a PR.
+3. Run `uv run pytest`, `uv run ruff check .`, `uv run flake8 .`, and `uv run mypy src main.py` before opening a PR.
 4. Prefix your PR title (and, since merges are squashed, the merge commit message) with a
    [Conventional Commits](https://www.conventionalcommits.org/) type — see [Releases](#releases)
    below for exactly how each type maps to a version bump.

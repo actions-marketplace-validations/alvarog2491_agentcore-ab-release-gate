@@ -22,6 +22,7 @@ uv run pytest --cov=src/agentcore_release_gate --cov=main --cov-report=term-miss
 
 # Lint
 uv run ruff check .
+uv run flake8 .
 
 # Format
 uv run ruff format .

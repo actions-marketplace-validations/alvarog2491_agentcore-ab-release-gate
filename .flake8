@@ -1,0 +1,9 @@
+# flake8 can't read pyproject.toml, so its config lives here. Kept in step with
+# [tool.ruff] in pyproject.toml: same line length and the same excluded directories.
+[flake8]
+max-line-length = 100
+# `ruff format` owns layout: E203 (whitespace before ':') conflicts with its slice
+# formatting, and E501 would flag the long string literals it deliberately leaves
+# unsplit (ruff's own lint config doesn't select E501 either).
+extend-ignore = E203,E501
+extend-exclude = .venv,.mypy_cache,.pytest_cache,.ruff_cache
