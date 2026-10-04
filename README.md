@@ -4,7 +4,7 @@
 
 <p>
   <a href="https://github.com/alvarog2491/agentcore-ab-release-gate/actions/workflows/ci.yml"><img src="https://github.com/alvarog2491/agentcore-ab-release-gate/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI" /></a>
-  <a href="https://github.com/alvarog2491/agentcore-ab-release-gate/actions/workflows/ci.yml"><img src="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/alvarog2491/agentcore-ab-release-gate/badges/coverage.json" alt="Coverage" /></a>
+  <a href="https://github.com/alvarog2491/agentcore-ab-release-gate/actions/workflows/ci.yml"><img src="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/alvarog2491/agentcore-ab-release-gate/badges/coverage.json&amp;label=coverage" alt="Coverage" /></a>
   <a href="https://github.com/alvarog2491/agentcore-ab-release-gate/releases/latest"><img src="https://img.shields.io/github/v/release/alvarog2491/agentcore-ab-release-gate?sort=semver" alt="Release" /></a>
   <a href="https://github.com/marketplace/actions/agentcore-a-b-release-gate"><img src="https://img.shields.io/badge/Marketplace-GitHub%20Action-2088FF?logo=github&amp;logoColor=white" alt="GitHub Marketplace" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/github/license/alvarog2491/agentcore-ab-release-gate" alt="License" /></a>
