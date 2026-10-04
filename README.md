@@ -1,8 +1,22 @@
-# AgentCore A/B Release Gate
+<div align="center">
 
-AgentCore A/B Release Gate is a composite GitHub Action that evaluates an existing Amazon Bedrock AgentCore Runtime candidate against the currently approved version. It promotes the candidate only when every configured quality gate passes; otherwise it restores the existing runtime version.
+<h1>AgentCore A/B Release Gate</h1>
+
+<p>
+  <a href="https://github.com/alvarog2491/agentcore-ab-release-gate/actions/workflows/ci.yml"><img src="https://github.com/alvarog2491/agentcore-ab-release-gate/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI" /></a>
+  <a href="https://github.com/alvarog2491/agentcore-ab-release-gate/actions/workflows/ci.yml"><img src="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/alvarog2491/agentcore-ab-release-gate/badges/coverage.json&amp;label=coverage" alt="Coverage" /></a>
+  <a href="https://github.com/alvarog2491/agentcore-ab-release-gate/releases/latest"><img src="https://img.shields.io/github/v/release/alvarog2491/agentcore-ab-release-gate?sort=semver" alt="Release" /></a>
+  <a href="https://github.com/marketplace/actions/agentcore-a-b-release-gate"><img src="https://img.shields.io/badge/Marketplace-GitHub%20Action-2088FF?logo=github&amp;logoColor=white" alt="GitHub Marketplace" /></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/alvarog2491/agentcore-ab-release-gate" alt="License" /></a>
+  <a href="https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/what-is-bedrock-agentcore.html"><img src="https://img.shields.io/badge/Amazon%20Bedrock-AgentCore-232F3E?logo=amazonwebservices&amp;logoColor=white" alt="Amazon Bedrock AgentCore" /></a>
+</p>
+
+<p>AgentCore A/B Release Gate is a composite GitHub Action that evaluates an existing Amazon Bedrock AgentCore Runtime candidate against the currently approved version. It promotes the candidate only when every configured quality gate passes; otherwise it restores the existing runtime version.
 
 The action does not build container images or generate traffic. Give it an existing Linux ARM64 ECR image and ensure that real traffic reaches the configured AgentCore Gateway during the observation period.
+</p>
+
+</div>
 
 ## What the action does
 

@@ -27,24 +27,62 @@ jobs:
       - run: uv lock --check
       - run: uv sync --frozen
       - run: uv run ruff check .
+      - run: uv run flake8 .
       - run: uv run ruff format --check .
       - run: uv run mypy src main.py
 
   test:
     name: Test suite
     runs-on: ubuntu-latest
+    outputs:
+      coverage: ${{ steps.coverage.outputs.total }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
           enable-cache: true
       - run: uv sync --frozen
+      # The coverage budget (fail_under) lives in pyproject.toml's [tool.coverage.report].
       - name: Run tests with coverage
         run: |
           uv run pytest \
             --cov=src/agentcore_release_gate --cov=main \
-            --cov-report=term-missing --cov-report=xml \
-            --cov-fail-under=85
+            --cov-report=term-missing --cov-report=xml
+      - name: Record total coverage
+        id: coverage
+        run: echo "total=$(uv run coverage report --format=total)" >> "$GITHUB_OUTPUT"
+
+  coverage-badge:
+    name: Publish coverage badge
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    needs: [test]
+    runs-on: ubuntu-latest
+    concurrency:
+      group: coverage-badge-${{ github.workflow }}
+      cancel-in-progress: false
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # Overwrites the orphan `badges` branch with a single shields.io endpoint file, so
+      # the README badge needs no third-party coverage service and the branch never grows.
+      - name: Push the shields.io endpoint file to the badges branch
+        env:
+          COVERAGE: ${{ needs.test.outputs.coverage }}
+        run: |
+          if awk -v c="$COVERAGE" 'BEGIN { exit !(c >= 95) }'; then color=brightgreen
+          elif awk -v c="$COVERAGE" 'BEGIN { exit !(c >= 85) }'; then color=yellow
+          else color=red
+          fi
+          git config user.name "github-actions"
+          git config user.email "actions@users.noreply.github.com"
+          git checkout --orphan badges
+          git rm -rf --quiet .
+          printf '{"schemaVersion":1,"label":"coverage","message":"%s%%","color":"%s"}\n' \
+            "$COVERAGE" "$color" > coverage.json
+          git add coverage.json
+          git commit --quiet -m "Update coverage badge to ${COVERAGE}%"
+          git push --force origin badges
 
   actionlint:
     name: Lint GitHub workflow files
