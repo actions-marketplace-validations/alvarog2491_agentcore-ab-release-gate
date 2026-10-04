@@ -17,7 +17,7 @@ uv run pytest tests/test_action.py
 # Run a single test by name
 uv run pytest tests/test_action.py::test_name
 
-# Run with coverage (CI enforces >=85%)
+# Run with coverage (fails below [tool.coverage.report].fail_under in pyproject.toml)
 uv run pytest --cov=src/agentcore_release_gate --cov=main --cov-report=term-missing
 
 # Lint

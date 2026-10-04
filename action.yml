@@ -1,5 +1,9 @@
 name: AgentCore A/B Release Gate
 description: Test an existing ECR image with a native AgentCore A/B test, then promote or roll back.
+# GitHub Marketplace listing icon (a Feather icon name) and background color.
+branding:
+  icon: shield
+  color: orange
 inputs:
   image-uri:
     description: Existing ARM64 ECR image tag or digest; no image is built or published
