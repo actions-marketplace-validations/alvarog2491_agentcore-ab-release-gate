@@ -2,6 +2,50 @@
 
 <!-- version list -->
 
+## v1.1.3 (2026-10-06)
+
+### Bug Fixes
+
+- Persist control endpoint in a typed recovery journal
+  ([#10](https://github.com/alvarog2491/agentcore-ab-release-gate/pull/10),
+  [`808b4c1`](https://github.com/alvarog2491/agentcore-ab-release-gate/commit/808b4c1a3274b114ce0bb28aa990051f27980542))
+
+### Chores
+
+- Add flake8 linting
+  ([`d09c44f`](https://github.com/alvarog2491/agentcore-ab-release-gate/commit/d09c44f6810c453eb99d8a75fd9f2e58813765e9))
+
+- Remove bump_readme_pin script and update AGENTS instructions
+  ([#8](https://github.com/alvarog2491/agentcore-ab-release-gate/pull/8),
+  [`400d647`](https://github.com/alvarog2491/agentcore-ab-release-gate/commit/400d6471f131e29b4d33d20923317f53648eda6c))
+
+- Remove test for bump_readme_pin script
+  ([#8](https://github.com/alvarog2491/agentcore-ab-release-gate/pull/8),
+  [`400d647`](https://github.com/alvarog2491/agentcore-ab-release-gate/commit/400d6471f131e29b4d33d20923317f53648eda6c))
+
+### Continuous Integration
+
+- Add coverage and README badges
+  ([`16b82b8`](https://github.com/alvarog2491/agentcore-ab-release-gate/commit/16b82b8329e0ee5e1c4c0459e6b2e09383e975e5))
+
+### Documentation
+
+- Fix coverage badge
+  ([`9a81723`](https://github.com/alvarog2491/agentcore-ab-release-gate/commit/9a81723ee726337e8de37ba7f8cbb594fa67d9e5))
+
+### Refactoring
+
+- Separate module concerns and simplify deployment code
+  ([#7](https://github.com/alvarog2491/agentcore-ab-release-gate/pull/7),
+  [`e9b847b`](https://github.com/alvarog2491/agentcore-ab-release-gate/commit/e9b847bb200f0d46b7d65b85bee93270ba92ea45))
+
+### Testing
+
+- Split tests per module and tighten names and assertions
+  ([#9](https://github.com/alvarog2491/agentcore-ab-release-gate/pull/9),
+  [`332c018`](https://github.com/alvarog2491/agentcore-ab-release-gate/commit/332c0189997aee2eb7cb75b85ff6973004234bba))
+
+
 ## v1.1.2 (2026-09-27)
 
 ### Bug Fixes

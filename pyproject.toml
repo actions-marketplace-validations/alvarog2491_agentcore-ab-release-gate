@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "agentcore-ab-release-gate"
-version = "1.1.2"
+version = "1.1.3"
 description = "GitHub Action that deploys an ARM64 ECR image to AgentCore Runtime, runs a native A/B test, and promotes or rolls back based on managed evaluation results."
 readme = "README.md"
 requires-python = ">=3.13"
@@ -44,6 +44,10 @@ disallow_untyped_defs = true
 [[tool.mypy.overrides]]
 module = "tests.*"
 disallow_untyped_defs = false
+
+[[tool.mypy.overrides]]
+module = "agentcore_release_gate.aws_client"
+warn_return_any = false
 
 [tool.pytest.ini_options]
 pythonpath = [".", "src", "tests"]
