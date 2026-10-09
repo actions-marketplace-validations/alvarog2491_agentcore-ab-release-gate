@@ -35,6 +35,8 @@ The action keeps the completed A/B test available in AWS so you can review it la
   <img src="agentcore_gateway_traffic_evaluation.gif" width="600" alt="AgentCore A/B Release Gate demo" />
 </div>
 
+A showcase of this action can be found in this post: [Releasing and evaluating AI agents on Amazon Bedrock AgentCore with A/B tests and explainability](https://dev.to/alvarog2491/releasing-and-evaluating-ai-agents-on-amazon-bedrock-agentcore-with-ab-tests-and-explainability-2hp9).
+
 ## Prerequisites
 
 Before using the action, provide the following resources in one AWS Region:
